@@ -28,7 +28,10 @@ import urllib.parse
 import urllib.request
 import urllib.error
 
-from curl_cffi import requests
+try:
+    from curl_cffi import requests
+except ModuleNotFoundError as exc:
+    raise SystemExit("[Error] 缺少依赖 curl_cffi，请先执行 `pip install -r requirements.txt`，并确认使用的是项目虚拟环境。") from exc
 
 # ==========================================
 # Mail.tm 临时邮箱 API
@@ -47,10 +50,7 @@ def _mailtm_headers(*, token: str = "", use_json: bool = False) -> Dict[str, str
 
 
 def _mailtm_req(method: str, url: str, headers: dict, proxies: Any = None, timeout: int = 12, json_body=None) -> Any:
-    """Use standard requests for all Mail.tm calls - reliable timeout support"""
-    import requests as _std_req
-    import warnings
-    warnings.filterwarnings("ignore")
+    """使用已安装的 curl_cffi.requests 发起 Mail.tm 请求"""
 
     class FakeResp:
         def __init__(self, body, status):
@@ -61,9 +61,9 @@ def _mailtm_req(method: str, url: str, headers: dict, proxies: Any = None, timeo
 
     try:
         if method.upper() == "POST":
-            r = _std_req.post(url, headers=headers, proxies=proxies, timeout=timeout, json=json_body)
+            r = requests.post(url, headers=headers, proxies=proxies, timeout=timeout, json=json_body)
         else:
-            r = _std_req.get(url, headers=headers, proxies=proxies, timeout=timeout)
+            r = requests.get(url, headers=headers, proxies=proxies, timeout=timeout)
         return FakeResp(r.content, r.status_code)
     except Exception:
         return FakeResp(b'{}', 0)
