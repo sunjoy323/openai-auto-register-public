@@ -12,6 +12,14 @@
   "imap_id_version": "1.0.0",
   "imap_id_vendor": "openai-auto-register",
   "imap_id_support_email": "",
+  "team_login": {
+    "workspace_id": "",
+    "workspace_name": "",
+    "prefer_team": true,
+    "sleep_seconds": 3,
+    "token_dir": "",
+    "emails": []
+  },
   "register": {
     "sleep_min": 5,
     "sleep_max": 30,

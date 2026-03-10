@@ -792,6 +792,333 @@ def submit_callback_url(
     return json.dumps(config, ensure_ascii=False, separators=(",", ":"))
 
 
+def _build_proxies(proxy: Optional[str]) -> Any:
+    if not proxy:
+        return None
+    return {"http": proxy, "https": proxy}
+
+
+def _check_network_location(session: Any) -> None:
+    trace = session.get("https://cloudflare.com/cdn-cgi/trace", timeout=10)
+    trace_text = trace.text
+    loc_re = re.search(r"^loc=(.+)$", trace_text, re.MULTILINE)
+    loc = loc_re.group(1) if loc_re else None
+    print(f"[*] 当前 IP 所在地: {loc}")
+    if loc == "CN" or loc == "HK":
+        raise RuntimeError("检查代理哦 - 所在地不支持")
+
+
+def _request_sentinel_token(device_id: str, proxies: Any = None) -> str:
+    req_body = f'{{"p":"","id":"{device_id}","flow":"authorize_continue"}}'
+    resp = requests.post(
+        "https://sentinel.openai.com/backend-api/sentinel/req",
+        headers={
+            "origin": "https://sentinel.openai.com",
+            "referer": "https://sentinel.openai.com/backend-api/sentinel/frame.html?sv=20260219f9f6",
+            "content-type": "text/plain;charset=UTF-8",
+        },
+        data=req_body,
+        proxies=proxies,
+        impersonate="chrome",
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Sentinel 异常拦截，状态码: {resp.status_code}")
+    token = str((resp.json() or {}).get("token") or "").strip()
+    if not token:
+        raise RuntimeError("Sentinel 响应缺少 token")
+    return token
+
+
+def _workspace_text_values(workspace: Dict[str, Any]) -> list[str]:
+    values = []
+    for key in (
+        "id",
+        "name",
+        "title",
+        "display_name",
+        "slug",
+        "workspace_id",
+        "workspace_type",
+        "type",
+        "organization_id",
+        "organization_name",
+    ):
+        value = workspace.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            values.append(text)
+    return values
+
+
+def _workspace_label(workspace: Dict[str, Any]) -> str:
+    for key in ("display_name", "name", "title", "slug", "id"):
+        value = str(workspace.get(key) or "").strip()
+        if value:
+            return value
+    return "<unknown>"
+
+
+def _workspace_looks_team(workspace: Dict[str, Any]) -> bool:
+    true_flags = ("is_team", "team", "is_enterprise", "is_business")
+    for key in true_flags:
+        value = workspace.get(key)
+        if value is True:
+            return True
+
+    personal_flags = ("is_personal", "personal", "personal_workspace")
+    for key in personal_flags:
+        value = workspace.get(key)
+        if value is True:
+            return False
+
+    type_text = " ".join(_workspace_text_values(workspace)).lower()
+    if any(marker in type_text for marker in ("team", "enterprise", "business", "org", "organization")):
+        return True
+    if any(marker in type_text for marker in ("personal", "个人")):
+        return False
+
+    org_id = str(workspace.get("organization_id") or "").strip()
+    return bool(org_id)
+
+
+def choose_workspace(
+    workspaces: list[Any],
+    workspace_id: str = "",
+    workspace_name: str = "",
+    prefer_team: bool = False,
+) -> Optional[Dict[str, Any]]:
+    candidates = [item for item in workspaces if isinstance(item, dict)]
+    if not candidates:
+        return None
+
+    target_id = str(workspace_id or "").strip().lower()
+    if target_id:
+        for workspace in candidates:
+            for key in ("id", "workspace_id"):
+                value = str(workspace.get(key) or "").strip().lower()
+                if value and value == target_id:
+                    return workspace
+
+    target_name = str(workspace_name or "").strip().lower()
+    if target_name:
+        for workspace in candidates:
+            values = [value.lower() for value in _workspace_text_values(workspace)]
+            if any(value == target_name for value in values):
+                return workspace
+        for workspace in candidates:
+            values = [value.lower() for value in _workspace_text_values(workspace)]
+            if any(target_name in value for value in values):
+                return workspace
+
+    if prefer_team:
+        for workspace in candidates:
+            if _workspace_looks_team(workspace):
+                return workspace
+
+    return candidates[0]
+
+
+def _extract_workspaces_from_session(session: Any) -> list[Dict[str, Any]]:
+    auth_cookie = session.cookies.get("oai-client-auth-session")
+    if not auth_cookie:
+        raise RuntimeError("未能获取到授权 Cookie")
+
+    auth_json = _decode_jwt_segment(auth_cookie.split(".")[0])
+    workspaces = auth_json.get("workspaces") or []
+    if not isinstance(workspaces, list) or not workspaces:
+        raise RuntimeError("授权 Cookie 里没有 workspace 信息")
+    return [workspace for workspace in workspaces if isinstance(workspace, dict)]
+
+
+def _follow_workspace_continue(session: Any, oauth: OAuthStart, continue_url: str) -> str:
+    current_url = continue_url
+    for _ in range(6):
+        final_resp = session.get(current_url, allow_redirects=False, timeout=15)
+        location = final_resp.headers.get("Location") or ""
+
+        if final_resp.status_code not in [301, 302, 303, 307, 308]:
+            break
+        if not location:
+            break
+
+        next_url = urllib.parse.urljoin(current_url, location)
+        if "code=" in next_url and "state=" in next_url:
+            return submit_callback_url(
+                callback_url=next_url,
+                code_verifier=oauth.code_verifier,
+                redirect_uri=oauth.redirect_uri,
+                expected_state=oauth.state,
+            )
+        current_url = next_url
+
+    raise RuntimeError("未能在重定向链中捕获到最终 Callback URL")
+
+
+def select_workspace_and_submit(
+    session: Any,
+    oauth: OAuthStart,
+    workspace_id: str = "",
+    workspace_name: str = "",
+    prefer_team: bool = False,
+) -> str:
+    workspaces = _extract_workspaces_from_session(session)
+    workspace = choose_workspace(workspaces, workspace_id, workspace_name, prefer_team)
+    if not workspace:
+        raise RuntimeError("无法选择目标 workspace")
+
+    selected_workspace_id = str((workspace.get("id") or workspace.get("workspace_id") or "")).strip()
+    if not selected_workspace_id:
+        raise RuntimeError("无法解析 workspace_id")
+
+    print(f"[*] 选中工作空间: {_workspace_label(workspace)} ({selected_workspace_id})")
+
+    select_resp = session.post(
+        "https://auth.openai.com/api/accounts/workspace/select",
+        headers={
+            "referer": "https://auth.openai.com/sign-in-with-chatgpt/codex/consent",
+            "content-type": "application/json",
+        },
+        data=json.dumps({"workspace_id": selected_workspace_id}, ensure_ascii=False, separators=(",", ":")),
+    )
+
+    if select_resp.status_code != 200:
+        raise RuntimeError(f"选择 workspace 失败，状态码: {select_resp.status_code}; 响应: {select_resp.text}")
+
+    continue_url = str((select_resp.json() or {}).get("continue_url") or "").strip()
+    if not continue_url:
+        raise RuntimeError("workspace/select 响应里缺少 continue_url")
+
+    return _follow_workspace_continue(session, oauth, continue_url)
+
+
+def login_with_email_otp(
+    email: str,
+    proxy: Optional[str],
+    config: Optional[Dict[str, Any]] = None,
+    workspace_id: str = "",
+    workspace_name: str = "",
+    prefer_team: bool = True,
+) -> Optional[str]:
+    login_email = str(email or "").strip()
+    if not login_email:
+        print("[Error] 登录邮箱不能为空")
+        return None
+
+    proxies = _build_proxies(proxy)
+    mail_cfg = build_mail_provider_config(config, "")
+    try:
+        validate_mail_provider_config(mail_cfg)
+    except ValueError as e:
+        print(f"[Error] {e}")
+        return None
+
+    if mail_cfg.provider != "imap":
+        print("[Error] 邮箱列表登录脚本目前只支持 mail_provider=imap")
+        return None
+
+    s = requests.Session(proxies=proxies, impersonate="chrome")
+
+    try:
+        _check_network_location(s)
+        oauth = generate_oauth_url()
+        s.get(oauth.auth_url, timeout=15)
+        did = s.cookies.get("oai-did")
+        print(f"[*] Device ID: {did}")
+        if not did:
+            raise RuntimeError("未获取到 oai-did")
+
+        sen_token = _request_sentinel_token(did, proxies)
+        sentinel = json.dumps({"p": "", "t": "", "c": sen_token, "id": did, "flow": "authorize_continue"}, ensure_ascii=False, separators=(",", ":"))
+        login_body = json.dumps(
+            {"username": {"value": login_email, "kind": "email"}, "screen_hint": "login"},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        login_resp = s.post(
+            "https://auth.openai.com/api/accounts/authorize/continue",
+            headers={
+                "referer": "https://auth.openai.com/log-in",
+                "accept": "application/json",
+                "content-type": "application/json",
+                "openai-sentinel-token": sentinel,
+            },
+            data=login_body,
+        )
+        print(f"[*] 提交登录邮箱状态: {login_resp.status_code}")
+        if login_resp.status_code != 200:
+            print(login_resp.text)
+            return None
+
+        login_data = login_resp.json() or {}
+        continue_url = str(login_data.get("continue_url") or "").strip()
+        page = login_data.get("page") or {}
+        page_type = str(page.get("type") or "").strip().lower()
+        page_payload = page.get("payload") or {}
+
+        if continue_url:
+            try:
+                page_resp = s.get(continue_url, timeout=15)
+                print(f"[*] 登录后续页面状态: {page_resp.status_code} {continue_url}")
+            except Exception as e:
+                print(f"[Warn] 打开登录后续页面失败，继续尝试收码: {e}")
+
+        otp_already_ready = ("email-verification" in continue_url) or (page_type == "email_otp_verification")
+        if otp_already_ready:
+            print("[*] 登录流程已进入验证码验证页，跳过重复发送验证码")
+        else:
+            passwordless_disabled = bool(page_payload.get("passwordless_disabled"))
+            if passwordless_disabled:
+                print("[Error] 当前账号流程要求密码登录，未开放一次性验证码登录")
+                return None
+
+            otp_resp = s.post(
+                "https://auth.openai.com/api/accounts/passwordless/send-otp",
+                headers={
+                    "referer": continue_url or "https://auth.openai.com/log-in",
+                    "accept": "application/json",
+                    "content-type": "application/json",
+                },
+                timeout=15,
+            )
+            print(f"[*] 登录验证码发送状态: {otp_resp.status_code}")
+            if otp_resp.status_code != 200:
+                print(otp_resp.text)
+                return None
+
+        code = get_oai_code("", login_email, proxies, mail_cfg)
+        if not code:
+            return None
+
+        code_resp = s.post(
+            "https://auth.openai.com/api/accounts/email-otp/validate",
+            headers={
+                "referer": "https://auth.openai.com/email-verification",
+                "accept": "application/json",
+                "content-type": "application/json",
+            },
+            data=json.dumps({"code": code}, ensure_ascii=False, separators=(",", ":")),
+        )
+        print(f"[*] 登录验证码校验状态: {code_resp.status_code}")
+        if code_resp.status_code != 200:
+            print(code_resp.text)
+            return None
+
+        return select_workspace_and_submit(
+            s,
+            oauth,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            prefer_team=prefer_team,
+        )
+    except Exception as e:
+        print(f"[Error] 邮箱 OTP 登录失败: {e}")
+        return None
+
+
 # ==========================================
 # 核心注册逻辑
 # ==========================================

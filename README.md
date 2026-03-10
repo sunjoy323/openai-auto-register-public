@@ -63,6 +63,12 @@ python3 run.py
 python3 register.py --once --config config.json
 ```
 
+### 通过 `team_login_run.py` 批量登录邮箱列表并换取 Team Token
+
+```bash
+python3 team_login_run.py --config config.json
+```
+
 ---
 
 ## 文件说明
@@ -71,6 +77,7 @@ python3 register.py --once --config config.json
 |------|------|
 | `register.py` | 核心注册逻辑，可独立运行 |
 | `run.py` | 批量/并行运行脚本，读取 config.json |
+| `team_login_run.py` | 读取邮箱列表，使用一次性验证码登录后选择 Team 工作空间并保存 Token |
 | `config.json.example` | 配置文件模板，复制为 config.json 后使用 |
 | `requirements.txt` | Python 依赖列表 |
 | `tokens/` | 注册成功的 Token 存放目录（自动创建） |
@@ -90,6 +97,14 @@ python3 register.py --once --config config.json
   "imap_user": "",
   "imap_pass": "",
   "imap_folder": "INBOX",
+  "team_login": {
+    "workspace_id": "",
+    "workspace_name": "",
+    "prefer_team": true,
+    "sleep_seconds": 3,
+    "token_dir": "",
+    "emails": []
+  },
   "register": {
     "sleep_min": 5,
     "sleep_max": 30,
@@ -108,6 +123,12 @@ python3 register.py --once --config config.json
 | `imap_user` | `imap` 模式下的登录邮箱 |
 | `imap_pass` | `imap` 模式下的登录密码或客户端授权码 |
 | `imap_folder` | `imap` 模式下读取的文件夹，默认 `INBOX` |
+| `team_login.workspace_id` | 批量登录脚本要选择的工作空间 ID，优先级最高 |
+| `team_login.workspace_name` | 批量登录脚本要选择的工作空间名称，未填 `workspace_id` 时使用 |
+| `team_login.prefer_team` | 未指定 ID/名称时是否优先选择看起来像 Team 的工作空间 |
+| `team_login.sleep_seconds` | 邮箱列表脚本每个邮箱之间的等待秒数 |
+| `team_login.token_dir` | 邮箱列表脚本保存 Token 的目录，留空则默认 `tokens/` |
+| `team_login.emails` | 需要执行 OTP 登录的邮箱列表 |
 | `register.sleep_min` | 两次注册之间最短等待秒数 |
 | `register.sleep_max` | 两次注册之间最长等待秒数 |
 | `register.email_prefix` | 注册邮箱前缀，`mailtm` 和 `imap + domain` 模式都会使用 |
@@ -115,6 +136,8 @@ python3 register.py --once --config config.json
 当 `mail_provider=imap` 时，脚本会参考 `use_163mail/openai-auto-register` 的做法，通过 IMAP 轮询验证码邮件，并自动兼容 163/126 这类需要发送 `IMAP ID` 的邮箱服务器。
 
 如果你配置了 `domain`，脚本会生成 `register.email_prefix + 随机串@domain` 这样的注册邮箱；如果 `domain` 留空，则直接使用 `imap_user` 作为注册邮箱。后者没法批量变邮箱，别头铁开高并发，不然自己跟自己抢验证码。
+
+如果你使用 `team_login_run.py`，建议显式填写 `team_login.workspace_id` 或 `team_login.workspace_name`。不填也能跑，但只能靠脚本按字段猜哪个像 Team 工作空间，能用但不够稳，别把玄学当能力。
 
 ---
 
