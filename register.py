@@ -104,7 +104,7 @@ def _mailtm_domains(proxies: Any = None) -> list[str]:
     return domains
 
 
-def get_email_and_token(proxies: Any = None) -> tuple[str, str]:
+def get_email_and_token(proxies: Any = None, prefix: str = "oc") -> tuple[str, str]:
     """创建 Mail.tm 邮箱并获取 Bearer Token"""
     try:
         domains = _mailtm_domains(proxies)
@@ -114,7 +114,7 @@ def get_email_and_token(proxies: Any = None) -> tuple[str, str]:
         domain = random.choice(domains)
 
         for _ in range(5):
-            local = f"oc{secrets.token_hex(5)}"
+            local = f"{prefix}{secrets.token_hex(5)}"
             email = f"{local}@{domain}"
             password = secrets.token_urlsafe(18)
 
@@ -453,7 +453,7 @@ def submit_callback_url(
 # ==========================================
 
 
-def run(proxy: Optional[str]) -> Optional[str]:
+def run(proxy: Optional[str], email_prefix: str = "oc") -> Optional[str]:
     proxies: Any = None
     if proxy:
         proxies = {"http": proxy, "https": proxy}
@@ -472,7 +472,7 @@ def run(proxy: Optional[str]) -> Optional[str]:
         print(f"[Error] 网络连接检查失败: {e}")
         return None
 
-    email, dev_token = get_email_and_token(proxies)
+    email, dev_token = get_email_and_token(proxies, email_prefix)
     if not email or not dev_token:
         return None
     print(f"[*] 成功获取 Mail.tm 邮箱与授权: {email}")

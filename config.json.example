@@ -2,6 +2,7 @@
   "proxy": "http://127.0.0.1:7890",
   "register": {
     "sleep_min": 5,
-    "sleep_max": 30
+    "sleep_max": 30,
+    "email_prefix": "gk"
   }
 }

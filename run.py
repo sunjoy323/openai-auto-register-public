@@ -55,7 +55,10 @@ def log_result(email: str, success: bool, account_id: str = ""):
 def run_once(cfg: dict, tag: str = "") -> bool:
     """注册一个账号并保存 Token"""
     proxy = cfg.get("proxy")
-    token_json = register_run(proxy)
+    reg_cfg = cfg.get("register", {})
+    prefix = reg_cfg.get("email_prefix", "oc")
+    
+    token_json = register_run(proxy, prefix)
 
     if not token_json:
         log_result("unknown", False)
