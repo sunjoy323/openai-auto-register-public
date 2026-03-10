@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import time
+import imaplib
 import uuid
 import math
 import random
@@ -17,12 +18,16 @@ import string
 import secrets
 import hashlib
 import base64
+import email as email_module
 import threading
 import subprocess
 import argparse
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse, parse_qs, urlencode, quote
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from email.header import decode_header
+from email.message import Message
+from email.utils import getaddresses, parsedate_to_datetime
 from typing import Any, Dict, Optional
 import urllib.parse
 import urllib.request
@@ -38,6 +43,98 @@ except ModuleNotFoundError as exc:
 # ==========================================
 
 MAILTM_BASE = "https://api.mail.tm"
+
+IMAP_TRUTHY = {"true", "1", "yes", "on"}
+IMAP_FALSY = {"false", "0", "no", "off"}
+
+
+@dataclass
+class ImapConfig:
+    host: str = ""
+    port: int = 993
+    user: str = ""
+    password: str = ""
+    folder: str = "INBOX"
+    domain: str = ""
+    id_mode: str = "auto"
+    id_name: str = "openai-auto-register"
+    id_version: str = "1.0.0"
+    id_vendor: str = "openai-auto-register"
+    id_support_email: str = ""
+
+
+@dataclass
+class MailProviderConfig:
+    provider: str = "mailtm"
+    email_prefix: str = "oc"
+    imap: ImapConfig = field(default_factory=ImapConfig)
+
+
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _clean_text(value: Any, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def _config_value(raw_cfg: Dict[str, Any], nested_cfg: Dict[str, Any], key: str, default: Any = "") -> Any:
+    if key in nested_cfg:
+        return nested_cfg.get(key, default)
+    return raw_cfg.get(key, default)
+
+
+def build_mail_provider_config(raw_cfg: Optional[Dict[str, Any]], email_prefix: str = "oc") -> MailProviderConfig:
+    config = raw_cfg if isinstance(raw_cfg, dict) else {}
+    nested_imap = config.get("imap", {}) if isinstance(config.get("imap"), dict) else {}
+
+    provider = _clean_text(config.get("mail_provider"), "mailtm").lower() or "mailtm"
+    if provider not in {"mailtm", "imap"}:
+        provider = "mailtm"
+
+    imap = ImapConfig(
+        host=_clean_text(_config_value(config, nested_imap, "imap_host")),
+        port=_safe_int(_config_value(config, nested_imap, "imap_port", 993), 993),
+        user=_clean_text(_config_value(config, nested_imap, "imap_user")),
+        password=_clean_text(_config_value(config, nested_imap, "imap_pass")),
+        folder=_clean_text(_config_value(config, nested_imap, "imap_folder"), "INBOX") or "INBOX",
+        domain=_clean_text(_config_value(config, nested_imap, "domain")),
+        id_mode=_clean_text(_config_value(config, nested_imap, "imap_id_mode"), "auto").lower() or "auto",
+        id_name=_clean_text(_config_value(config, nested_imap, "imap_id_name"), "openai-auto-register") or "openai-auto-register",
+        id_version=_clean_text(_config_value(config, nested_imap, "imap_id_version"), "1.0.0") or "1.0.0",
+        id_vendor=_clean_text(_config_value(config, nested_imap, "imap_id_vendor"), "openai-auto-register") or "openai-auto-register",
+        id_support_email=_clean_text(_config_value(config, nested_imap, "imap_id_support_email")),
+    )
+
+    return MailProviderConfig(
+        provider=provider,
+        email_prefix=_clean_text(email_prefix, "oc") or "oc",
+        imap=imap,
+    )
+
+
+def validate_mail_provider_config(mail_cfg: MailProviderConfig) -> None:
+    if mail_cfg.provider != "imap":
+        return
+
+    missing = []
+    if not mail_cfg.imap.host:
+        missing.append("imap_host")
+    if not mail_cfg.imap.user:
+        missing.append("imap_user")
+    if not mail_cfg.imap.password:
+        missing.append("imap_pass")
+
+    if missing:
+        raise ValueError(f"当前 mail_provider=imap，缺少配置项: {', '.join(missing)}")
+
+    if not mail_cfg.imap.domain and "@" not in mail_cfg.imap.user:
+        raise ValueError("IMAP 模式需要配置 domain，或让 imap_user 直接填写完整邮箱地址")
 
 
 def _mailtm_headers(*, token: str = "", use_json: bool = False) -> Dict[str, str]:
@@ -104,8 +201,143 @@ def _mailtm_domains(proxies: Any = None) -> list[str]:
     return domains
 
 
-def get_email_and_token(proxies: Any = None, prefix: str = "oc") -> tuple[str, str]:
-    """创建 Mail.tm 邮箱并获取 Bearer Token"""
+def should_send_imap_id(imap_cfg: ImapConfig) -> bool:
+    mode = imap_cfg.id_mode
+    if mode in IMAP_TRUTHY:
+        return True
+    if mode in IMAP_FALSY:
+        return False
+
+    host = imap_cfg.host.lower()
+    user = imap_cfg.user.lower()
+    netease_hosts = ("163.com", "126.com", "yeah.net", "188.com")
+    netease_domains = ("@163.com", "@126.com", "@yeah.net", "@188.com")
+    return any(key in host for key in netease_hosts) or user.endswith(netease_domains)
+
+
+def imap_quote(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def send_imap_id_if_needed(mailbox: imaplib.IMAP4_SSL, imap_cfg: ImapConfig) -> None:
+    if not should_send_imap_id(imap_cfg):
+        return
+
+    support_email = imap_cfg.id_support_email or (imap_cfg.user if "@" in imap_cfg.user else "noreply@example.com")
+    id_pairs = [
+        ("name", imap_cfg.id_name),
+        ("version", imap_cfg.id_version),
+        ("vendor", imap_cfg.id_vendor),
+        ("support-email", support_email),
+    ]
+    payload = " ".join(f'"{key}" "{imap_quote(val)}"' for key, val in id_pairs if val)
+    if not payload:
+        return
+
+    try:
+        typ, data = mailbox.xatom("ID", f"({payload})")
+        if str(typ).upper() == "OK":
+            print("[*] 已发送 IMAP ID 标识")
+        else:
+            print(f"[Warn] IMAP ID 返回异常: {typ} {data}")
+    except Exception as e:
+        print(f"[Warn] 发送 IMAP ID 失败，已忽略: {e}")
+
+
+def build_imap_registration_email(mail_cfg: MailProviderConfig) -> str:
+    domain = mail_cfg.imap.domain
+    if domain:
+        local = f"{mail_cfg.email_prefix}{secrets.token_hex(5)}"
+        return f"{local}@{domain}"
+
+    user = mail_cfg.imap.user
+    if "@" in user:
+        return user
+
+    return ""
+
+
+def _decode_mime_value(value: str) -> str:
+    if not value:
+        return ""
+
+    parts = []
+    for chunk, encoding in decode_header(value):
+        if isinstance(chunk, bytes):
+            try:
+                parts.append(chunk.decode(encoding or "utf-8", errors="ignore"))
+            except LookupError:
+                parts.append(chunk.decode("utf-8", errors="ignore"))
+        else:
+            parts.append(str(chunk))
+    return "".join(parts)
+
+
+def _extract_message_body(msg: Message) -> str:
+    bodies = []
+    parts = msg.walk() if msg.is_multipart() else [msg]
+    for part in parts:
+        content_type = part.get_content_type()
+        disposition = str(part.get("Content-Disposition") or "").lower()
+        if "attachment" in disposition:
+            continue
+        if content_type not in {"text/plain", "text/html"}:
+            continue
+
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            bodies.append(str(part.get_payload() or ""))
+            continue
+
+        charset = part.get_content_charset() or "utf-8"
+        try:
+            bodies.append(payload.decode(charset, errors="ignore"))
+        except LookupError:
+            bodies.append(payload.decode("utf-8", errors="ignore"))
+    return "\n".join(body for body in bodies if body)
+
+
+def _message_timestamp(msg: Message) -> Optional[float]:
+    date_header = msg.get("Date")
+    if not date_header:
+        return None
+    try:
+        parsed = parsedate_to_datetime(date_header)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _recipient_matches(msg: Message, email_addr: str, body: str) -> bool:
+    email_lower = email_addr.lower()
+    header_values = []
+    for header_name in ("To", "Cc", "Delivered-To", "X-Original-To", "X-Forwarded-To"):
+        for header_value in msg.get_all(header_name, []):
+            header_values.append(_decode_mime_value(header_value))
+
+    addresses = [addr.lower() for _, addr in getaddresses(header_values) if addr]
+    if any(email_lower == addr or email_lower in addr for addr in addresses):
+        return True
+    if any(email_lower in value.lower() for value in header_values):
+        return True
+    return email_lower in body.lower()
+
+
+def get_email_and_token(proxies: Any = None, prefix: str = "oc", mail_cfg: Optional[MailProviderConfig] = None) -> tuple[str, str]:
+    """根据配置获取注册邮箱；Mail.tm 返回邮箱+Token，IMAP 返回邮箱"""
+    if mail_cfg and mail_cfg.provider == "imap":
+        email_addr = build_imap_registration_email(mail_cfg)
+        if not email_addr:
+            print("[Error] IMAP 模式未能生成注册邮箱，请检查 domain 或 imap_user 配置")
+            return "", ""
+        if mail_cfg.imap.domain:
+            print(f"[*] IMAP 模式已生成注册邮箱: {email_addr}")
+        else:
+            print(f"[*] IMAP 模式将直接使用邮箱: {email_addr}")
+        return email_addr, ""
+
     try:
         domains = _mailtm_domains(proxies)
         if not domains:
@@ -149,8 +381,120 @@ def get_email_and_token(proxies: Any = None, prefix: str = "oc") -> tuple[str, s
         return "", ""
 
 
-def get_oai_code(token: str, email: str, proxies: Any = None) -> str:
-    """使用 Mail.tm Token 轮询获取 OpenAI 验证码"""
+def get_oai_code_imap(mail_cfg: MailProviderConfig, email_addr: str, timeout: int = 120) -> str:
+    regex = r"(?<!\d)(\d{6})(?!\d)"
+    seen_ids: set[bytes] = set()
+    start_ts = time.time()
+    mailbox: Optional[imaplib.IMAP4_SSL] = None
+
+    print(f"[*] 正在等待邮箱 {email_addr} 的验证码 (IMAP)...", end="", flush=True)
+
+    try:
+        mailbox = imaplib.IMAP4_SSL(mail_cfg.imap.host, mail_cfg.imap.port, timeout=15)
+        try:
+            mailbox.login(mail_cfg.imap.user, mail_cfg.imap.password)
+        except imaplib.IMAP4.error as e:
+            if "Unsafe Login" in str(e):
+                print(" [Error] IMAP 登录被拒绝: Unsafe Login，请确认已启用 IMAP、使用客户端授权码，并保留 imap_id_mode=true")
+            raise
+        send_imap_id_if_needed(mailbox, mail_cfg.imap)
+
+        status, data = mailbox.select(mail_cfg.imap.folder)
+        if status != "OK":
+            detail = ""
+            if isinstance(data, (list, tuple)) and data:
+                first = data[0]
+                if isinstance(first, bytes):
+                    detail = first.decode("utf-8", errors="ignore")
+                else:
+                    detail = str(first)
+            print(f" [Error] 无法打开 IMAP 收件箱: {mail_cfg.imap.folder} {detail}".rstrip())
+            return ""
+
+        while time.time() - start_ts < timeout:
+            print(".", end="", flush=True)
+            try:
+                mailbox.noop()
+            except Exception:
+                pass
+
+            status, data = mailbox.search(None, "ALL")
+            if status != "OK" or not data:
+                time.sleep(3)
+                continue
+
+            message_ids = data[0].split()
+            for msg_id in reversed(message_ids[-20:]):
+                if msg_id in seen_ids:
+                    continue
+                seen_ids.add(msg_id)
+
+                fetch_status, fetch_data = mailbox.fetch(msg_id, "(RFC822)")
+                if fetch_status != "OK" or not fetch_data:
+                    continue
+
+                raw_message = None
+                for item in fetch_data:
+                    if isinstance(item, tuple) and len(item) >= 2:
+                        raw_message = item[1]
+                        break
+                if not raw_message:
+                    continue
+
+                msg = email_module.message_from_bytes(raw_message)
+                msg_ts = _message_timestamp(msg)
+                if msg_ts is not None and msg_ts < (start_ts - 120):
+                    continue
+
+                sender = _decode_mime_value(msg.get("From", ""))
+                subject = _decode_mime_value(msg.get("Subject", ""))
+                body = _extract_message_body(msg)
+                content = "\n".join([sender, subject, body])
+
+                if "openai" not in content.lower():
+                    continue
+                if not _recipient_matches(msg, email_addr, body):
+                    continue
+
+                match = re.search(regex, content)
+                if not match:
+                    continue
+
+                otp_code = match.group(1)
+                print(" 抓到啦! 验证码:", otp_code)
+                try:
+                    mailbox.store(msg_id, "+FLAGS", r"(\Deleted)")
+                    mailbox.expunge()
+                except Exception:
+                    pass
+                return otp_code
+
+            time.sleep(3)
+    except imaplib.IMAP4.error as e:
+        print(f" [Error] IMAP 登录或读取失败: {e}")
+    except Exception as e:
+        print(f" [Error] IMAP 获取验证码失败: {e}")
+    finally:
+        print("", flush=True)
+        if mailbox is not None:
+            try:
+                mailbox.close()
+            except Exception:
+                pass
+            try:
+                mailbox.logout()
+            except Exception:
+                pass
+
+    print(" 超时，未收到验证码")
+    return ""
+
+
+def get_oai_code(token: str, email: str, proxies: Any = None, mail_cfg: Optional[MailProviderConfig] = None) -> str:
+    """按收件方式轮询获取 OpenAI 验证码"""
+    if mail_cfg and mail_cfg.provider == "imap":
+        return get_oai_code_imap(mail_cfg, email)
+
     url_list = f"{MAILTM_BASE}/messages"
     regex = r"(?<!\d)(\d{6})(?!\d)"
     seen_ids: set[str] = set()
@@ -453,10 +797,17 @@ def submit_callback_url(
 # ==========================================
 
 
-def run(proxy: Optional[str], email_prefix: str = "oc") -> Optional[str]:
+def run(proxy: Optional[str], email_prefix: str = "oc", config: Optional[Dict[str, Any]] = None) -> Optional[str]:
     proxies: Any = None
     if proxy:
         proxies = {"http": proxy, "https": proxy}
+
+    mail_cfg = build_mail_provider_config(config, email_prefix)
+    try:
+        validate_mail_provider_config(mail_cfg)
+    except ValueError as e:
+        print(f"[Error] {e}")
+        return None
 
     s = requests.Session(proxies=proxies, impersonate="chrome")
 
@@ -472,10 +823,14 @@ def run(proxy: Optional[str], email_prefix: str = "oc") -> Optional[str]:
         print(f"[Error] 网络连接检查失败: {e}")
         return None
 
-    email, dev_token = get_email_and_token(proxies, email_prefix)
+    email, dev_token = get_email_and_token(proxies, email_prefix, mail_cfg)
     if not email or not dev_token:
-        return None
-    print(f"[*] 成功获取 Mail.tm 邮箱与授权: {email}")
+        if mail_cfg.provider != "imap":
+            return None
+        if not email:
+            return None
+    elif mail_cfg.provider == "mailtm":
+        print(f"[*] 成功获取 Mail.tm 邮箱与授权: {email}")
 
     oauth = generate_oauth_url()
     url = oauth.auth_url
@@ -530,7 +885,7 @@ def run(proxy: Optional[str], email_prefix: str = "oc") -> Optional[str]:
         )
         print(f"[*] 验证码发送状态: {otp_resp.status_code}")
 
-        code = get_oai_code(dev_token, email, proxies)
+        code = get_oai_code(dev_token, email, proxies, mail_cfg)
         if not code:
             return None
 
@@ -627,7 +982,9 @@ def run(proxy: Optional[str], email_prefix: str = "oc") -> Optional[str]:
 
 
 def main() -> None:
+    default_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
     parser = argparse.ArgumentParser(description="OpenAI 自动注册脚本")
+    parser.add_argument("--config", default=default_config_path, help="配置文件路径，默认读取同目录 config.json")
     parser.add_argument(
         "--proxy", default=None, help="代理地址，如 http://127.0.0.1:7890"
     )
@@ -637,6 +994,18 @@ def main() -> None:
         "--sleep-max", type=int, default=30, help="循环模式最长等待秒数"
     )
     args = parser.parse_args()
+
+    file_cfg: Dict[str, Any] = {}
+    if args.config and os.path.exists(args.config):
+        try:
+            with open(args.config, "r", encoding="utf-8") as f:
+                file_cfg = json.load(f)
+        except Exception as e:
+            print(f"[Warn] 读取配置文件失败，继续使用命令行参数: {e}")
+
+    reg_cfg = file_cfg.get("register", {}) if isinstance(file_cfg.get("register"), dict) else {}
+    proxy = args.proxy if args.proxy else file_cfg.get("proxy")
+    email_prefix = _clean_text(reg_cfg.get("email_prefix"), "oc") or "oc"
 
     sleep_min = max(1, args.sleep_min)
     sleep_max = max(sleep_min, args.sleep_max)
@@ -651,7 +1020,7 @@ def main() -> None:
         )
 
         try:
-            token_json = run(args.proxy)
+            token_json = run(proxy, email_prefix, file_cfg)
 
             if token_json:
                 try:

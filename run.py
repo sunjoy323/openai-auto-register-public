@@ -58,7 +58,7 @@ def run_once(cfg: dict, tag: str = "") -> bool:
     reg_cfg = cfg.get("register", {})
     prefix = reg_cfg.get("email_prefix", "oc")
     
-    token_json = register_run(proxy, prefix)
+    token_json = register_run(proxy, prefix, cfg)
 
     if not token_json:
         log_result("unknown", False)
@@ -88,6 +88,7 @@ def main():
 
     cfg = load_config()
     reg_cfg = cfg.get("register", {})
+    mail_provider = str(cfg.get("mail_provider", "mailtm") or "mailtm").strip().lower()
     sleep_min = reg_cfg.get("sleep_min", 5)
     sleep_max = reg_cfg.get("sleep_max", 30)
 
@@ -96,6 +97,7 @@ def main():
 
     print(f"[Info] OpenAI 自动注册工具")
     print(f"[Info] 代理: {cfg.get('proxy', '无')}")
+    print(f"[Info] 收码方式: {'IMAP' if mail_provider == 'imap' else 'Mail.tm'}")
     print(f"[Info] 目标: {'无限循环' if target == 0 else f'{target} 个'}")
     print(f"[Info] 并行: {parallel} 线程")
     print()

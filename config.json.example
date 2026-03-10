@@ -1,5 +1,17 @@
 {
   "proxy": "http://127.0.0.1:7890",
+  "mail_provider": "mailtm",
+  "domain": "",
+  "imap_host": "imap.163.com",
+  "imap_port": 993,
+  "imap_user": "",
+  "imap_pass": "",
+  "imap_folder": "INBOX",
+  "imap_id_mode": "auto",
+  "imap_id_name": "openai-auto-register",
+  "imap_id_version": "1.0.0",
+  "imap_id_vendor": "openai-auto-register",
+  "imap_id_support_email": "",
   "register": {
     "sleep_min": 5,
     "sleep_max": 30,

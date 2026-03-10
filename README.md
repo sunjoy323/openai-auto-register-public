@@ -34,7 +34,7 @@ pip install -r requirements.txt
 
 # 复制并编辑配置文件
 cp config.json.example config.json
-# 修改 config.json 中的代理地址
+# 修改 config.json 中的代理地址与收码方式
 ```
 
 ---
@@ -60,7 +60,7 @@ python3 run.py
 ### 直接使用 register.py（单次测试）
 
 ```bash
-python3 register.py --once --proxy http://127.0.0.1:7890
+python3 register.py --once --config config.json
 ```
 
 ---
@@ -83,9 +83,17 @@ python3 register.py --once --proxy http://127.0.0.1:7890
 ```json
 {
   "proxy": "http://127.0.0.1:7890",
+  "mail_provider": "mailtm",
+  "domain": "",
+  "imap_host": "imap.163.com",
+  "imap_port": 993,
+  "imap_user": "",
+  "imap_pass": "",
+  "imap_folder": "INBOX",
   "register": {
     "sleep_min": 5,
-    "sleep_max": 30
+    "sleep_max": 30,
+    "email_prefix": "gk"
   }
 }
 ```
@@ -93,8 +101,20 @@ python3 register.py --once --proxy http://127.0.0.1:7890
 | 字段 | 说明 |
 |------|------|
 | `proxy` | HTTP 代理地址 |
+| `mail_provider` | 收码方式，支持 `mailtm` / `imap`，默认 `mailtm` |
+| `domain` | `imap` 模式下用于生成注册邮箱的域名；留空则直接使用 `imap_user` |
+| `imap_host` | `imap` 模式下的 IMAP 服务器地址 |
+| `imap_port` | `imap` 模式下的 IMAP 端口，默认 `993` |
+| `imap_user` | `imap` 模式下的登录邮箱 |
+| `imap_pass` | `imap` 模式下的登录密码或客户端授权码 |
+| `imap_folder` | `imap` 模式下读取的文件夹，默认 `INBOX` |
 | `register.sleep_min` | 两次注册之间最短等待秒数 |
 | `register.sleep_max` | 两次注册之间最长等待秒数 |
+| `register.email_prefix` | 注册邮箱前缀，`mailtm` 和 `imap + domain` 模式都会使用 |
+
+当 `mail_provider=imap` 时，脚本会参考 `use_163mail/openai-auto-register` 的做法，通过 IMAP 轮询验证码邮件，并自动兼容 163/126 这类需要发送 `IMAP ID` 的邮箱服务器。
+
+如果你配置了 `domain`，脚本会生成 `register.email_prefix + 随机串@domain` 这样的注册邮箱；如果 `domain` 留空，则直接使用 `imap_user` 作为注册邮箱。后者没法批量变邮箱，别头铁开高并发，不然自己跟自己抢验证码。
 
 ---
 
@@ -102,8 +122,8 @@ python3 register.py --once --proxy http://127.0.0.1:7890
 
 整个注册流程分为以下几个阶段：
 
-1. **Mail.tm 临时邮箱**  
-   调用 [mail.tm](https://mail.tm) 公开 API，动态创建一个临时邮箱地址，用于接收 OpenAI 发送的验证码。
+1. **邮箱准备**  
+   默认调用 [mail.tm](https://mail.tm) 公开 API 动态创建临时邮箱；如果配置了 `mail_provider=imap`，则使用配置中的 IMAP 邮箱收取验证码。
 
 2. **OAuth PKCE 授权流程**  
    模拟 OpenAI Codex CLI 的登录方式，使用 OAuth 2.0 + PKCE（Proof Key for Code Exchange）协议发起授权请求，获取 `state` 和 `code_verifier`。
@@ -112,7 +132,7 @@ python3 register.py --once --proxy http://127.0.0.1:7890
    向 OpenAI Sentinel 端点发送设备指纹请求，获取 `sentinel token`，附带在后续注册请求的请求头中，绕过 bot 检测。
 
 4. **OTP 邮箱验证**  
-   提交注册表单后，OpenAI 会向临时邮箱发送 6 位数字验证码（OTP）。脚本轮询 Mail.tm API，自动提取验证码并提交校验。
+   提交注册表单后，OpenAI 会发送 6 位数字验证码（OTP）。脚本会根据配置轮询 Mail.tm API 或 IMAP 收件箱，自动提取验证码并提交校验。
 
 5. **Workspace 选择 + Token 换取**  
    创建账号后自动选择默认 workspace，跟随重定向链，在 callback URL 中提取 `code`，最终通过 PKCE 换取 `access_token` / `refresh_token` / `id_token`。
