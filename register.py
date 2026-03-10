@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import time
+import calendar
 import imaplib
 import uuid
 import math
@@ -381,10 +382,43 @@ def get_email_and_token(proxies: Any = None, prefix: str = "oc", mail_cfg: Optio
         return "", ""
 
 
-def get_oai_code_imap(mail_cfg: MailProviderConfig, email_addr: str, timeout: int = 120) -> str:
+def snapshot_imap_message_ids(mail_cfg: MailProviderConfig) -> set[bytes]:
+    mailbox: Optional[imaplib.IMAP4_SSL] = None
+    try:
+        mailbox = imaplib.IMAP4_SSL(mail_cfg.imap.host, mail_cfg.imap.port, timeout=15)
+        mailbox.login(mail_cfg.imap.user, mail_cfg.imap.password)
+        send_imap_id_if_needed(mailbox, mail_cfg.imap)
+        status, data = mailbox.select(mail_cfg.imap.folder)
+        if status != "OK":
+            return set()
+        status, data = mailbox.search(None, "ALL")
+        if status != "OK" or not data:
+            return set()
+        return set(data[0].split())
+    except Exception:
+        return set()
+    finally:
+        if mailbox is not None:
+            try:
+                mailbox.close()
+            except Exception:
+                pass
+            try:
+                mailbox.logout()
+            except Exception:
+                pass
+
+
+def get_oai_code_imap(
+    mail_cfg: MailProviderConfig,
+    email_addr: str,
+    timeout: int = 120,
+    baseline_ids: Optional[set[bytes]] = None,
+    started_at: Optional[float] = None,
+) -> str:
     regex = r"(?<!\d)(\d{6})(?!\d)"
-    seen_ids: set[bytes] = set()
-    start_ts = time.time()
+    seen_ids: set[bytes] = set(baseline_ids or set())
+    start_ts = started_at if started_at is not None else time.time()
     mailbox: Optional[imaplib.IMAP4_SSL] = None
 
     print(f"[*] 正在等待邮箱 {email_addr} 的验证码 (IMAP)...", end="", flush=True)
@@ -424,7 +458,7 @@ def get_oai_code_imap(mail_cfg: MailProviderConfig, email_addr: str, timeout: in
                 continue
 
             message_ids = data[0].split()
-            for msg_id in reversed(message_ids[-20:]):
+            for msg_id in reversed(message_ids[-50:]):
                 if msg_id in seen_ids:
                     continue
                 seen_ids.add(msg_id)
@@ -443,7 +477,7 @@ def get_oai_code_imap(mail_cfg: MailProviderConfig, email_addr: str, timeout: in
 
                 msg = email_module.message_from_bytes(raw_message)
                 msg_ts = _message_timestamp(msg)
-                if msg_ts is not None and msg_ts < (start_ts - 120):
+                if msg_ts is not None and msg_ts < (start_ts - 30):
                     continue
 
                 sender = _decode_mime_value(msg.get("From", ""))
@@ -490,10 +524,17 @@ def get_oai_code_imap(mail_cfg: MailProviderConfig, email_addr: str, timeout: in
     return ""
 
 
-def get_oai_code(token: str, email: str, proxies: Any = None, mail_cfg: Optional[MailProviderConfig] = None) -> str:
+def get_oai_code(
+    token: str,
+    email: str,
+    proxies: Any = None,
+    mail_cfg: Optional[MailProviderConfig] = None,
+    imap_baseline_ids: Optional[set[bytes]] = None,
+    started_at: Optional[float] = None,
+) -> str:
     """按收件方式轮询获取 OpenAI 验证码"""
     if mail_cfg and mail_cfg.provider == "imap":
-        return get_oai_code_imap(mail_cfg, email)
+        return get_oai_code_imap(mail_cfg, email, baseline_ids=imap_baseline_ids, started_at=started_at)
 
     url_list = f"{MAILTM_BASE}/messages"
     regex = r"(?<!\d)(\d{6})(?!\d)"
@@ -668,6 +709,31 @@ def _to_int(v: Any) -> int:
         return int(v)
     except (TypeError, ValueError):
         return 0
+
+
+def generate_random_profile() -> Dict[str, str]:
+    first_names = [
+        "Alex", "Ethan", "Liam", "Noah", "Mason", "Logan", "Lucas", "Henry",
+        "James", "Daniel", "Leo", "Jack", "Owen", "Ryan", "Aiden", "Jason",
+        "Emma", "Olivia", "Sophia", "Ava", "Mia", "Chloe", "Lily", "Grace",
+        "Zoe", "Hannah", "Ella", "Nora", "Lucy", "Ruby", "Ivy", "Aria",
+    ]
+    last_names = [
+        "Smith", "Johnson", "Brown", "Taylor", "Anderson", "Thomas", "Jackson", "White",
+        "Harris", "Martin", "Thompson", "Moore", "Walker", "Young", "Hall", "Allen",
+        "King", "Wright", "Scott", "Green", "Baker", "Adams", "Nelson", "Carter",
+    ]
+
+    year = random.randint(1990, 2000)
+    month = random.randint(1, 12)
+    max_day = calendar.monthrange(year, month)[1]
+    day = random.randint(1, max_day)
+
+    profile = {
+        "name": f"{random.choice(first_names)} {random.choice(last_names)}",
+        "birthdate": f"{year:04d}-{month:02d}-{day:02d}",
+    }
+    return profile
 
 
 def _post_form(url: str, data: Dict[str, str], timeout: int = 30) -> Dict[str, Any]:
@@ -1020,6 +1086,8 @@ def login_with_email_otp(
         return None
 
     s = requests.Session(proxies=proxies, impersonate="chrome")
+    imap_baseline_ids = snapshot_imap_message_ids(mail_cfg)
+    flow_started_at = time.time()
 
     try:
         _check_network_location(s)
@@ -1089,7 +1157,14 @@ def login_with_email_otp(
                 print(otp_resp.text)
                 return None
 
-        code = get_oai_code("", login_email, proxies, mail_cfg)
+        code = get_oai_code(
+            "",
+            login_email,
+            proxies,
+            mail_cfg,
+            imap_baseline_ids=imap_baseline_ids,
+            started_at=flow_started_at,
+        )
         if not code:
             return None
 
@@ -1161,6 +1236,8 @@ def run(proxy: Optional[str], email_prefix: str = "oc", config: Optional[Dict[st
 
     oauth = generate_oauth_url()
     url = oauth.auth_url
+    imap_baseline_ids = snapshot_imap_message_ids(mail_cfg) if mail_cfg.provider == "imap" else None
+    otp_started_at = time.time()
 
     try:
         resp = s.get(url, timeout=15)
@@ -1212,7 +1289,14 @@ def run(proxy: Optional[str], email_prefix: str = "oc", config: Optional[Dict[st
         )
         print(f"[*] 验证码发送状态: {otp_resp.status_code}")
 
-        code = get_oai_code(dev_token, email, proxies, mail_cfg)
+        code = get_oai_code(
+            dev_token,
+            email,
+            proxies,
+            mail_cfg,
+            imap_baseline_ids=imap_baseline_ids,
+            started_at=otp_started_at,
+        )
         if not code:
             return None
 
@@ -1228,7 +1312,9 @@ def run(proxy: Optional[str], email_prefix: str = "oc", config: Optional[Dict[st
         )
         print(f"[*] 验证码校验状态: {code_resp.status_code}")
 
-        create_account_body = '{"name":"Neo","birthdate":"2000-02-20"}'
+        profile = generate_random_profile()
+        print(f"[*] 本次注册资料: {profile['name']} / {profile['birthdate']}")
+        create_account_body = json.dumps(profile, ensure_ascii=False, separators=(",", ":"))
         create_account_resp = s.post(
             "https://auth.openai.com/api/accounts/create_account",
             headers={
