@@ -69,6 +69,25 @@ python3 register.py --once --config config.json
 python3 team_login_run.py --config config.json
 ```
 
+使用说明：
+
+1. 将 `mail_provider` 设置为 `imap`，并填好 `imap_host`、`imap_port`、`imap_user`、`imap_pass`。这俩登录脚本都靠 IMAP 收 OpenAI 发来的 OTP，`mailtm` 在这里不顶用，别硬拧。
+2. 在 `team_login.emails` 里填要登录的邮箱列表。这些邮箱必须能把验证码邮件投递到你配置的 IMAP 收件箱，不然脚本只能陪你干瞪眼。
+3. 建议显式填写 `team_login.workspace_id` 或 `team_login.workspace_name`，这样能稳定选中目标 Team 空间；如果都不填，脚本会按字段特征优先猜像 Team 的 workspace。
+4. `team_login.token_dir` 可指定输出目录，留空默认写到 `tokens/`；每次执行结果会追加记录到 `team_login_history.log`。
+
+### 通过 `personal_login_run.py` 批量登录普通号并选择个人空间换取 Token
+
+```bash
+python3 personal_login_run.py --config config.json
+```
+
+使用说明：
+
+1. 前置条件和 `team_login_run.py` 一样，同样要求 `mail_provider=imap`，并且 `personal_login.emails` 里的邮箱都能在当前 IMAP 收件箱里收到验证码。
+2. `personal_login.workspace_id` / `personal_login.workspace_name` 仍然支持手动指定目标空间；如果都不填，脚本会优先选择看起来像个人空间的 workspace，不再靠列表顺序碰运气。
+3. `personal_login.token_dir` 留空默认写到 `tokens/`，文件名前缀为 `personal_token_`，执行日志会写到 `personal_login_history.log`。
+
 ---
 
 ## 文件说明
@@ -78,6 +97,7 @@ python3 team_login_run.py --config config.json
 | `register.py` | 核心注册逻辑，可独立运行 |
 | `run.py` | 批量/并行运行脚本，读取 config.json |
 | `team_login_run.py` | 读取邮箱列表，使用一次性验证码登录后选择 Team 工作空间并保存 Token |
+| `personal_login_run.py` | 读取邮箱列表，使用一次性验证码登录后优先选择个人空间并保存 Token |
 | `config.json.example` | 配置文件模板，复制为 config.json 后使用 |
 | `requirements.txt` | Python 依赖列表 |
 | `tokens/` | 注册成功的 Token 存放目录（自动创建） |
@@ -101,6 +121,14 @@ python3 team_login_run.py --config config.json
     "workspace_id": "",
     "workspace_name": "",
     "prefer_team": true,
+    "sleep_seconds": 3,
+    "token_dir": "",
+    "emails": []
+  },
+  "personal_login": {
+    "workspace_id": "",
+    "workspace_name": "",
+    "prefer_personal": true,
     "sleep_seconds": 3,
     "token_dir": "",
     "emails": []
@@ -129,6 +157,12 @@ python3 team_login_run.py --config config.json
 | `team_login.sleep_seconds` | 邮箱列表脚本每个邮箱之间的等待秒数 |
 | `team_login.token_dir` | 邮箱列表脚本保存 Token 的目录，留空则默认 `tokens/` |
 | `team_login.emails` | 需要执行 OTP 登录的邮箱列表 |
+| `personal_login.workspace_id` | 普通号登录脚本要选择的工作空间 ID，优先级最高 |
+| `personal_login.workspace_name` | 普通号登录脚本要选择的工作空间名称，未填 `workspace_id` 时使用 |
+| `personal_login.prefer_personal` | 未指定 ID/名称时是否优先选择看起来像个人空间的工作空间 |
+| `personal_login.sleep_seconds` | 普通号登录脚本每个邮箱之间的等待秒数 |
+| `personal_login.token_dir` | 普通号登录脚本保存 Token 的目录，留空则默认 `tokens/` |
+| `personal_login.emails` | 需要执行 OTP 登录的邮箱列表 |
 | `register.sleep_min` | 两次注册之间最短等待秒数 |
 | `register.sleep_max` | 两次注册之间最长等待秒数 |
 | `register.email_prefix` | 注册邮箱前缀，`mailtm` 和 `imap + domain` 模式都会使用 |
@@ -138,6 +172,8 @@ python3 team_login_run.py --config config.json
 如果你配置了 `domain`，脚本会生成 `register.email_prefix + 随机串@domain` 这样的注册邮箱；如果 `domain` 留空，则直接使用 `imap_user` 作为注册邮箱。后者没法批量变邮箱，别头铁开高并发，不然自己跟自己抢验证码。
 
 如果你使用 `team_login_run.py`，建议显式填写 `team_login.workspace_id` 或 `team_login.workspace_name`。不填也能跑，但只能靠脚本按字段猜哪个像 Team 工作空间，能用但不够稳，别把玄学当能力。
+
+如果你使用 `personal_login_run.py`，建议也把 `personal_login.workspace_id` 或 `personal_login.workspace_name` 配上。不填时脚本会优先挑个人空间，但账号下面如果挂了多个 workspace，最好还是写死，省得回头自己给自己上强度。
 
 ---
 

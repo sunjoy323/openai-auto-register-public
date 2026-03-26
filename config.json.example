@@ -20,6 +20,14 @@
     "token_dir": "",
     "emails": []
   },
+  "personal_login": {
+    "workspace_id": "",
+    "workspace_name": "",
+    "prefer_personal": true,
+    "sleep_seconds": 3,
+    "token_dir": "",
+    "emails": []
+  },
   "register": {
     "sleep_min": 5,
     "sleep_max": 30,

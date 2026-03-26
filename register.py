@@ -950,11 +950,35 @@ def _workspace_looks_team(workspace: Dict[str, Any]) -> bool:
     return bool(org_id)
 
 
+def _workspace_looks_personal(workspace: Dict[str, Any]) -> bool:
+    personal_flags = ("is_personal", "personal", "personal_workspace")
+    for key in personal_flags:
+        value = workspace.get(key)
+        if value is True:
+            return True
+
+    team_flags = ("is_team", "team", "is_enterprise", "is_business")
+    for key in team_flags:
+        value = workspace.get(key)
+        if value is True:
+            return False
+
+    type_text = " ".join(_workspace_text_values(workspace)).lower()
+    if any(marker in type_text for marker in ("personal", "个人")):
+        return True
+    if any(marker in type_text for marker in ("team", "enterprise", "business", "org", "organization")):
+        return False
+
+    org_id = str(workspace.get("organization_id") or "").strip()
+    return not bool(org_id)
+
+
 def choose_workspace(
     workspaces: list[Any],
     workspace_id: str = "",
     workspace_name: str = "",
     prefer_team: bool = False,
+    prefer_personal: bool = False,
 ) -> Optional[Dict[str, Any]]:
     candidates = [item for item in workspaces if isinstance(item, dict)]
     if not candidates:
@@ -982,6 +1006,11 @@ def choose_workspace(
     if prefer_team:
         for workspace in candidates:
             if _workspace_looks_team(workspace):
+                return workspace
+
+    if prefer_personal:
+        for workspace in candidates:
+            if _workspace_looks_personal(workspace):
                 return workspace
 
     return candidates[0]
@@ -1029,9 +1058,16 @@ def select_workspace_and_submit(
     workspace_id: str = "",
     workspace_name: str = "",
     prefer_team: bool = False,
+    prefer_personal: bool = False,
 ) -> str:
     workspaces = _extract_workspaces_from_session(session)
-    workspace = choose_workspace(workspaces, workspace_id, workspace_name, prefer_team)
+    workspace = choose_workspace(
+        workspaces,
+        workspace_id,
+        workspace_name,
+        prefer_team,
+        prefer_personal,
+    )
     if not workspace:
         raise RuntimeError("无法选择目标 workspace")
 
@@ -1067,6 +1103,7 @@ def login_with_email_otp(
     workspace_id: str = "",
     workspace_name: str = "",
     prefer_team: bool = True,
+    prefer_personal: bool = False,
 ) -> Optional[str]:
     login_email = str(email or "").strip()
     if not login_email:
@@ -1188,6 +1225,7 @@ def login_with_email_otp(
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             prefer_team=prefer_team,
+            prefer_personal=prefer_personal,
         )
     except Exception as e:
         print(f"[Error] 邮箱 OTP 登录失败: {e}")

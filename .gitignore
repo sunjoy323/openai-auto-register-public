@@ -2,7 +2,9 @@ venv/
 __pycache__/
 tokens/
 tokens_team/
+tokens_personal/
 history.log
 team_login_history.log
+personal_login_history.log
 config.json
 *.pyc
